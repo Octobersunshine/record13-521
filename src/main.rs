@@ -75,36 +75,37 @@ impl AppState {
 
         let mut exclusion_rules: HashMap<CouponCategory, HashSet<CouponCategory>> = HashMap::new();
 
-        let discount_excludes = {
+        exclusion_rules.insert(CouponCategory::Discount, {
             let mut s = HashSet::new();
             s.insert(CouponCategory::Discount);
             s.insert(CouponCategory::Cashback);
-            s
-        };
-        exclusion_rules.insert(CouponCategory::Discount, discount_excludes);
-
-        let cashback_excludes = {
-            let mut s = HashSet::new();
-            s.insert(CouponCategory::Discount);
             s.insert(CouponCategory::BOGO);
             s
-        };
-        exclusion_rules.insert(CouponCategory::Cashback, cashback_excludes);
-
-        let bogo_excludes = {
+        });
+        exclusion_rules.insert(CouponCategory::Cashback, {
             let mut s = HashSet::new();
+            s.insert(CouponCategory::Discount);
             s.insert(CouponCategory::Cashback);
+            s.insert(CouponCategory::BOGO);
             s.insert(CouponCategory::Gift);
             s
-        };
-        exclusion_rules.insert(CouponCategory::BOGO, bogo_excludes);
-
-        let gift_excludes = {
+        });
+        exclusion_rules.insert(CouponCategory::BOGO, {
             let mut s = HashSet::new();
+            s.insert(CouponCategory::Discount);
+            s.insert(CouponCategory::Cashback);
             s.insert(CouponCategory::BOGO);
+            s.insert(CouponCategory::Gift);
             s
-        };
-        exclusion_rules.insert(CouponCategory::Gift, gift_excludes);
+        });
+        exclusion_rules.insert(CouponCategory::Gift, {
+            let mut s = HashSet::new();
+            s.insert(CouponCategory::Cashback);
+            s.insert(CouponCategory::BOGO);
+            s.insert(CouponCategory::Gift);
+            s
+        });
+        exclusion_rules.insert(CouponCategory::FreeShipping, HashSet::new());
 
         Self { coupons, exclusion_rules }
     }
