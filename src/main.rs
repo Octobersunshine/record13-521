@@ -13,6 +13,7 @@ struct Coupon {
     id: u64,
     name: String,
     category: CouponCategory,
+    discount_amount: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -23,6 +24,18 @@ enum CouponCategory {
     Cashback,
     Gift,
     BOGO,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OptimizeRequest {
+    coupon_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OptimizeResponse {
+    total_discount: u64,
+    optimal_coupons: Vec<Coupon>,
+    excluded_coupons: Vec<Coupon>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60,14 +73,14 @@ impl AppState {
         let mut coupons = HashMap::new();
 
         let seed = vec![
-            Coupon { id: 1, name: "满100减20".into(), category: CouponCategory::Discount },
-            Coupon { id: 2, name: "全场8折".into(), category: CouponCategory::Discount },
-            Coupon { id: 3, name: "包邮券".into(), category: CouponCategory::FreeShipping },
-            Coupon { id: 4, name: "返现5元".into(), category: CouponCategory::Cashback },
-            Coupon { id: 5, name: "赠品券".into(), category: CouponCategory::Gift },
-            Coupon { id: 6, name: "买一送一".into(), category: CouponCategory::BOGO },
-            Coupon { id: 7, name: "满200减50".into(), category: CouponCategory::Discount },
-            Coupon { id: 8, name: "返现10元".into(), category: CouponCategory::Cashback },
+            Coupon { id: 1, name: "满100减20".into(), category: CouponCategory::Discount, discount_amount: 20 },
+            Coupon { id: 2, name: "全场8折".into(), category: CouponCategory::Discount, discount_amount: 80 },
+            Coupon { id: 3, name: "包邮券".into(), category: CouponCategory::FreeShipping, discount_amount: 15 },
+            Coupon { id: 4, name: "返现5元".into(), category: CouponCategory::Cashback, discount_amount: 5 },
+            Coupon { id: 5, name: "赠品券".into(), category: CouponCategory::Gift, discount_amount: 30 },
+            Coupon { id: 6, name: "买一送一".into(), category: CouponCategory::BOGO, discount_amount: 100 },
+            Coupon { id: 7, name: "满200减50".into(), category: CouponCategory::Discount, discount_amount: 50 },
+            Coupon { id: 8, name: "返现10元".into(), category: CouponCategory::Cashback, discount_amount: 10 },
         ];
         for c in seed {
             coupons.insert(c.id, c);
@@ -168,6 +181,91 @@ impl AppState {
 
         Ok(conflicts)
     }
+
+    fn has_conflicts(&self, coupons: &[&Coupon]) -> bool {
+        for i in 0..coupons.len() {
+            for j in (i + 1)..coupons.len() {
+                let a = &coupons[i];
+                let b = &coupons[j];
+                let a_excludes_b = self
+                    .exclusion_rules
+                    .get(&a.category)
+                    .map_or(false, |s| s.contains(&b.category));
+                let b_excludes_a = self
+                    .exclusion_rules
+                    .get(&b.category)
+                    .map_or(false, |s| s.contains(&a.category));
+                if a_excludes_b || b_excludes_a {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn optimize_coupons(&self, coupon_ids: &[u64]) -> Result<OptimizeResponse, String> {
+        let mut missing = Vec::new();
+        let mut selected: Vec<&Coupon> = Vec::new();
+        for &id in coupon_ids {
+            match self.coupons.get(&id) {
+                Some(c) => selected.push(c),
+                None => missing.push(id),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(format!("优惠券不存在: {:?}", missing));
+        }
+
+        selected.sort_by_key(|c| c.id);
+        selected.dedup_by_key(|c| c.id);
+
+        let n = selected.len();
+        if n == 0 {
+            return Ok(OptimizeResponse {
+                total_discount: 0,
+                optimal_coupons: Vec::new(),
+                excluded_coupons: Vec::new(),
+            });
+        }
+        if n > 31 {
+            return Err("优惠券数量过多（最多31张）".into());
+        }
+
+        let mut best_mask: u32 = 0;
+        let mut best_total: u64 = 0;
+
+        for mask in 0..(1u32 << n) {
+            let mut subset = Vec::new();
+            for i in 0..n {
+                if mask & (1u32 << i) != 0 {
+                    subset.push(selected[i]);
+                }
+            }
+            if !self.has_conflicts(&subset) {
+                let total: u64 = subset.iter().map(|c| c.discount_amount).sum();
+                if total > best_total {
+                    best_total = total;
+                    best_mask = mask;
+                }
+            }
+        }
+
+        let mut optimal = Vec::new();
+        let mut excluded = Vec::new();
+        for i in 0..n {
+            if best_mask & (1u32 << i) != 0 {
+                optimal.push(selected[i].clone());
+            } else {
+                excluded.push(selected[i].clone());
+            }
+        }
+
+        Ok(OptimizeResponse {
+            total_discount: best_total,
+            optimal_coupons: optimal,
+            excluded_coupons: excluded,
+        })
+    }
 }
 
 async fn list_coupons(State(state): State<Arc<AppState>>) -> Json<Vec<Coupon>> {
@@ -205,6 +303,28 @@ async fn validate_coupons(
     }
 }
 
+async fn optimize_coupons(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<OptimizeRequest>,
+) -> Result<(StatusCode, Json<OptimizeResponse>), (StatusCode, Json<ErrorResponse>)> {
+    if req.coupon_ids.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "coupon_ids 不能为空".into(),
+            }),
+        ));
+    }
+
+    match state.optimize_coupons(&req.coupon_ids) {
+        Ok(resp) => Ok((StatusCode::OK, Json(resp))),
+        Err(e) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse { error: e }),
+        )),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let state = Arc::new(AppState::new());
@@ -212,11 +332,13 @@ async fn main() {
     let app = Router::new()
         .route("/coupons", get(list_coupons))
         .route("/coupons/validate", post(validate_coupons))
+        .route("/coupons/optimize", post(optimize_coupons))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     println!("服务器启动: http://0.0.0.0:3000");
     println!("  GET  /coupons          - 查看所有优惠券");
     println!("  POST /coupons/validate - 校验优惠券互斥");
+    println!("  POST /coupons/optimize - 计算最优组合");
     axum::serve(listener, app).await.unwrap();
 }
